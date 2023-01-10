@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Github Actions'
+        required: true
+        default: 'Github Actions'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [14.x]
+
+    steps:
+    - uses: actions/checkout@v2
+
+    # Download NodeJS and Install Dependencies
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+    - run: npm install
+
+    # Scan the code with Trivy
+    - name: Scan code with Trivy
+      id: scan
+      uses: aquasecurity/trivy-action@master
+      with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          exit-code: '1'
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+    
+    # Build the NodeJS Application
+    - name: Build
+      run: npm build
+
+    # Test the NodeJS application and generate coverage
+    - name: Test
+      run: npm test -- --coverage
+      env:
+        CI: true
+
+    # Run Solarqube Analysis
+    - name: Sonarqube analysis
+      uses: SonarSource/sonarqube-scan-action@v1.2.0
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST }}
+      with:
+        args: >
+          -Dsonar.projectKey=hyperxpro_hackathon-starter
+          -Dsonar.organization=hyperxpro
+
+    # Build the NodeJS Docker Image
+    - name: Build Node.js Docker image
+      run: |
+        docker build -t my-node-app:${{ github.sha }} .
+        docker tag my-node-app:${{ github.sha }} my-node-app:latest
+
+    - name: Login to Docker Hub
+      run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+    - name: Push Docker image
+      run: docker push my-node-app:${{ github.sha }}
+      
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Authenticate with k8s cluster
+      run: |
+        kubectl config set-credentials deployment-user --token=${{ secrets.KUBE_TOKEN }}
+        kubectl config set-context deployment-context --cluster=${{ secrets.KUBE_CLUSTER_NAME }} --user=deployment-user --namespace=${{ secrets.KUBE_NAMESPACE }}
+
+    - name: Deploy in k8s using argocd
+      run: |
+        argocd app create my-node-app --repo https://github.com/my-org/my-node-app.git --path argocd --dest-server https://kubernetes.default.svc --dest-namespace ${{ secrets.KUBE_NAMESPACE }} --project ${{ secrets.ARGOCD_PROJECT }} --revision ${{ github.sha }} --sync-policy automated
+
+    - name: Deploy using Helm
+      run: |
+        helm install my-node-app chart/ --set image.tag=${GITHUB_SHA} -f values.yaml
+
+  provision-mongodb:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: 0.14.x
+    - name: Provision ec2 and install mongodb
+      run: |
+        terraform init
+        terraform apply -var-file=terraform.tfvars
+
+    - name: Add mongodb endpoints in configmaps
+      run: kubectl create configmap mongodb-config --from-literal=mongodb-endpoints="$(terraform output mongodb_endpoints)"
+
+    - name: Add mongodb secrets in kubernetes secret
+      run: kubectl create secret generic mongodb-secret --from-literal=mongodb-username="$(terraform output mongodb_username)" --from-literal=mongodb-password="$(terraform output mongodb_password)"

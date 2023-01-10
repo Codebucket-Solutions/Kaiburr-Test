@@ -1,0 +1,20 @@
+image:
+  repository: my-node-app
+  tag: latest
+
+replicaCount: 3
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  path: /
+
+mongodb:
+  enabled: true
+  host: mongodb-svc
+  port: 27017
+  username: mongodb-username
+  password: mongodb-password
